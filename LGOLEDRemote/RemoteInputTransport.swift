@@ -7,29 +7,38 @@ import Security
 //
 // Why not URLSessionWebSocketTask?
 // URLSession negotiates "Sec-WebSocket-Extensions: permessage-deflate" by
-// default. Many LG TV WebSocket servers (especially the /sys/remoteInputSocket
-// endpoint) don't implement that extension and close the connection during the
-// upgrade, leaving URLSession with a silently-dead socket. Third-party WebSocket
-// libraries used by working LG TV clients (node-lgtv2, aiowebostv) never send
-// extension headers and connect reliably.
+// default. Many LG TV WebSocket servers (especially /sys/remoteInputSocket)
+// don't implement that extension and close the connection during the upgrade,
+// leaving URLSession with a silently-dead socket.
 //
-// This class sends exactly the headers a minimal RFC-6455 client needs:
-//   GET /path HTTP/1.1, Host, Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version
-// Client frames are masked as required by §5.1.
+// IMPORTANT – continuation safety:
+// NWConnection fires stateUpdateHandler for EVERY state transition, including
+// .failed that can arrive after .ready if the server closes the TCP connection
+// mid-handshake. Passing CheckedContinuation as a function parameter creates
+// value-type copies that all share the same underlying reference; if two paths
+// both call resume(), Swift traps. We store the continuation as a property and
+// nil it atomically via resolveConnect(_:) so only the first caller fires it.
 
 final class RawWebSocketTransport: WebSocketTransporting {
     private let host: String
     private let port: UInt16
     private let path: String
+
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "com.sk.RawWebSocket", qos: .userInitiated)
+
     private var handshakeDone = false
+
+    private let lock = NSLock()
+    private var connectContinuation: CheckedContinuation<Void, Error>?
 
     init(host: String, port: UInt16, path: String) {
         self.host = host
         self.port = port
         self.path = path
     }
+
+    // MARK: – WebSocketTransporting
 
     func connect() async throws {
         let conn = NWConnection(
@@ -40,73 +49,23 @@ final class RawWebSocketTransport: WebSocketTransporting {
         self.connection = conn
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            connectContinuation = cont
+            lock.unlock()
+
             conn.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
-                    self?.doHandshake(conn: conn, continuation: cont)
+                    self?.doHandshake(conn: conn)
                 case .failed(let err):
-                    cont.resume(throwing: LGWebOSError.transport(err.localizedDescription))
+                    self?.resolveConnect(.failure(LGWebOSError.transport(err.localizedDescription)))
                 case .cancelled:
-                    cont.resume(throwing: LGWebOSError.notConnected)
+                    self?.resolveConnect(.failure(LGWebOSError.notConnected))
                 default:
                     break
                 }
             }
             conn.start(queue: queue)
-        }
-    }
-
-    private func doHandshake(conn: NWConnection, continuation: CheckedContinuation<Void, Error>) {
-        var keyBytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
-        let wsKey = Data(keyBytes).base64EncodedString()
-
-        let request =
-            "GET \(path) HTTP/1.1\r\n" +
-            "Host: \(host):\(port)\r\n" +
-            "Upgrade: websocket\r\n" +
-            "Connection: Upgrade\r\n" +
-            "Sec-WebSocket-Key: \(wsKey)\r\n" +
-            "Sec-WebSocket-Version: 13\r\n\r\n"
-
-        conn.send(content: Data(request.utf8), completion: .contentProcessed { [weak self] error in
-            if let error {
-                continuation.resume(throwing: LGWebOSError.transport(error.localizedDescription))
-                return
-            }
-            self?.readHandshakeResponse(conn: conn, buffer: Data(), continuation: continuation)
-        })
-    }
-
-    private func readHandshakeResponse(
-        conn: NWConnection,
-        buffer: Data,
-        continuation: CheckedContinuation<Void, Error>
-    ) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isDone, error in
-            if let error {
-                continuation.resume(throwing: LGWebOSError.transport(error.localizedDescription))
-                return
-            }
-            var buf = buffer
-            if let data { buf.append(data) }
-            guard let text = String(data: buf, encoding: .utf8) else {
-                continuation.resume(throwing: LGWebOSError.invalidResponse)
-                return
-            }
-            if text.contains("\r\n\r\n") {
-                if text.hasPrefix("HTTP/1.1 101") || text.hasPrefix("HTTP/1.0 101") {
-                    self?.handshakeDone = true
-                    continuation.resume()
-                } else {
-                    let status = String(text.prefix(120))
-                    continuation.resume(throwing: LGWebOSError.transport("WebSocket upgrade rejected: \(status)"))
-                }
-            } else if isDone {
-                continuation.resume(throwing: LGWebOSError.transport("Connection closed during WebSocket handshake"))
-            } else {
-                self?.readHandshakeResponse(conn: conn, buffer: buf, continuation: continuation)
-            }
         }
     }
 
@@ -124,19 +83,94 @@ final class RawWebSocketTransport: WebSocketTransporting {
         }
     }
 
-    // The remote input socket is send-only; the TV sends nothing back.
+    // The remote input socket is send-only; the TV doesn't send messages back.
+    // LGWebOSClient.startReceiveLoop() only calls receive() on the SSAP transport,
+    // so this is never reached in normal operation. Throw immediately so that
+    // any accidental call breaks the receive loop cleanly rather than spinning.
     func receive() async throws -> String {
-        try await Task.sleep(nanoseconds: UInt64.max)
-        throw LGWebOSError.invalidResponse
+        throw LGWebOSError.unsupported("receive() not supported on remote input socket")
     }
 
     func disconnect() {
         connection?.cancel()
         connection = nil
         handshakeDone = false
+        resolveConnect(.failure(LGWebOSError.notConnected))
     }
 
-    // RFC 6455 §5.2 – client frames must be masked with a random 4-byte key.
+    // MARK: – Handshake
+
+    private func doHandshake(conn: NWConnection) {
+        var keyBytes = [UInt8](repeating: 0, count: 16)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
+        let wsKey = Data(keyBytes).base64EncodedString()
+
+        let request =
+            "GET \(path) HTTP/1.1\r\n" +
+            "Host: \(host):\(port)\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Key: \(wsKey)\r\n" +
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+
+        conn.send(content: Data(request.utf8), completion: .contentProcessed { [weak self] error in
+            if let error {
+                self?.resolveConnect(.failure(LGWebOSError.transport(error.localizedDescription)))
+                return
+            }
+            self?.readHandshakeResponse(conn: conn, buffer: Data())
+        })
+    }
+
+    private func readHandshakeResponse(conn: NWConnection, buffer: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isDone, error in
+            if let error {
+                self?.resolveConnect(.failure(LGWebOSError.transport(error.localizedDescription)))
+                return
+            }
+            var buf = buffer
+            if let data { buf.append(data) }
+
+            guard let text = String(data: buf, encoding: .utf8) else {
+                self?.resolveConnect(.failure(LGWebOSError.invalidResponse))
+                return
+            }
+
+            if text.contains("\r\n\r\n") {
+                if text.hasPrefix("HTTP/1.1 101") || text.hasPrefix("HTTP/1.0 101") {
+                    self?.handshakeDone = true
+                    self?.resolveConnect(.success(()))
+                } else {
+                    let status = String(text.prefix(120))
+                    self?.resolveConnect(.failure(
+                        LGWebOSError.transport("WebSocket upgrade rejected: \(status)")))
+                }
+            } else if isDone {
+                self?.resolveConnect(.failure(
+                    LGWebOSError.transport("Connection closed during WebSocket handshake")))
+            } else {
+                self?.readHandshakeResponse(conn: conn, buffer: buf)
+            }
+        }
+    }
+
+    // MARK: – Helpers
+
+    /// Resumes the connect continuation exactly once. Thread-safe; subsequent calls are no-ops.
+    private func resolveConnect(_ result: Result<Void, Error>) {
+        lock.lock()
+        let cont = connectContinuation
+        connectContinuation = nil
+        lock.unlock()
+
+        guard let cont else { return }
+        switch result {
+        case .success:        cont.resume()
+        case .failure(let e): cont.resume(throwing: e)
+        }
+    }
+
+    /// RFC 6455 §5.2 – client frames MUST be masked with a random 4-byte key.
     private static func maskedTextFrame(_ text: String) -> Data {
         let payload = Data(text.utf8)
         var frame = Data()
