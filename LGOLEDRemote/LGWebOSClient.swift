@@ -103,6 +103,13 @@ final class LGWebOSClient: LGWebOSControlling {
     // the intermediate PROMPT "response" from a genuine command response.
     private var pendingRegistrationID: String?
 
+    // Second WebSocket to /sys/remoteInputSocket.
+    // D-pad, OK, Home, Back must go through this channel — the SSAP
+    // ssap://com.webos.service.networkinput/sendButton endpoint is unreliable
+    // across webOS versions, whereas the remote input socket is the same
+    // low-level path the physical LG Magic Remote uses.
+    private var remoteInputTransport: WebSocketTransporting?
+
     init(
         keyStore: ClientKeyStore,
         logger: Logger,
@@ -142,6 +149,19 @@ final class LGWebOSClient: LGWebOSControlling {
                     logger.info("[connect] Client key saved for TV id=\(tv.id)")
                 }
 
+                // Open the remote input socket (best-effort — don't abort if unavailable).
+                // This is the channel used for D-pad / OK / Home / Back buttons.
+                if let riURL = URL(string: "ws://\(tv.host):3000/sys/remoteInputSocket") {
+                    let riTransport = transportFactory(riURL)
+                    do {
+                        try await riTransport.connect()
+                        remoteInputTransport = riTransport
+                        logger.info("[connect] Remote input socket connected")
+                    } catch {
+                        logger.warning("[connect] Remote input socket unavailable: \(error.localizedDescription)")
+                    }
+                }
+
                 onConnectionStateChange?(.paired)
                 logger.info("[connect] Paired and ready — \(tv.name) @ \(endpoint.absoluteString)")
                 return
@@ -171,6 +191,8 @@ final class LGWebOSClient: LGWebOSControlling {
 
         continuations.forEach { $0.resume(throwing: LGWebOSError.notConnected) }
         currentTransport?.disconnect()
+        remoteInputTransport?.disconnect()
+        remoteInputTransport = nil
         onConnectionStateChange?(.disconnected)
         logger.info("[disconnect] WebSocket disconnected")
     }
@@ -206,6 +228,18 @@ final class LGWebOSClient: LGWebOSControlling {
     }
 
     func sendButton(_ name: String) async throws {
+        // The remote input socket uses a plain-text protocol (not JSON/SSAP).
+        // Format: "type:button\nname:KEY\n\n"
+        // This is the same path the physical LG Magic Remote uses and works
+        // on all webOS versions without additional permissions.
+        if let ri = remoteInputTransport {
+            let message = "type:button\nname:\(name)\n\n"
+            logger.debug("[remoteInput] → \(name)")
+            try await ri.send(text: message)
+            return
+        }
+        // Fallback: SSAP (may not work on all webOS versions)
+        logger.warning("[sendButton] Remote input socket not connected — falling back to SSAP")
         _ = try await sendRequest(
             uri: "ssap://com.webos.service.networkinput/sendButton",
             payload: ["name": .string(name)]
