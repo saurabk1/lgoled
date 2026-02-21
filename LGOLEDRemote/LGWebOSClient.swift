@@ -150,16 +150,17 @@ final class LGWebOSClient: LGWebOSControlling {
                 }
 
                 // Open the remote input socket (best-effort — don't abort if unavailable).
-                // This is the channel used for D-pad / OK / Home / Back buttons.
-                if let riURL = URL(string: "ws://\(tv.host):3000/sys/remoteInputSocket") {
-                    let riTransport = transportFactory(riURL)
-                    do {
-                        try await riTransport.connect()
-                        remoteInputTransport = riTransport
-                        logger.info("[connect] Remote input socket connected")
-                    } catch {
-                        logger.warning("[connect] Remote input socket unavailable: \(error.localizedDescription)")
-                    }
+                // Uses RawWebSocketTransport (plain TCP + manual HTTP upgrade) instead of
+                // URLSessionWebSocketTask, which negotiates permessage-deflate and causes
+                // many LG TV firmware versions to reject the upgrade silently.
+                let riTransport = RawWebSocketTransport(
+                    host: tv.host, port: 3000, path: "/sys/remoteInputSocket")
+                do {
+                    try await riTransport.connect()
+                    remoteInputTransport = riTransport
+                    logger.info("[connect] Remote input socket connected (raw TCP WebSocket)")
+                } catch {
+                    logger.warning("[connect] Remote input socket unavailable: \(error.localizedDescription)")
                 }
 
                 onConnectionStateChange?(.paired)
