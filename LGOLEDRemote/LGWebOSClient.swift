@@ -269,10 +269,14 @@ final class LGWebOSClient: LGWebOSControlling {
                     .string("LAUNCH_WEBAPP"),
                     .string("CONTROL_AUDIO"),
                     .string("CONTROL_INPUT_TEXT"),
+                    .string("CONTROL_INPUT_JOYSTICK"),
+                    .string("CONTROL_MOUSE_AND_KEYBOARD"),
                     .string("CONTROL_POWER"),
                     .string("READ_RUNNING_APPS"),
+                    .string("READ_CURRENT_CHANNEL"),
                     .string("READ_TV_CHANNEL_LIST"),
-                    .string("READ_INPUT_DEVICE_LIST")
+                    .string("READ_INPUT_DEVICE_LIST"),
+                    .string("READ_POWER_STATE")
                 ])
             ])
         ]
