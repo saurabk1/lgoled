@@ -228,22 +228,28 @@ final class LGWebOSClient: LGWebOSControlling {
     }
 
     func sendButton(_ name: String) async throws {
-        // The remote input socket uses a plain-text protocol (not JSON/SSAP).
-        // Format: "type:button\nname:KEY\n\n"
-        // This is the same path the physical LG Magic Remote uses and works
-        // on all webOS versions without additional permissions.
+        // Strategy 1: Remote input socket — plain-text protocol, no pairing required.
+        // webOS 4.x+ requires the "state:click" field; older firmware accepts without it.
         if let ri = remoteInputTransport {
-            let message = "type:button\nname:\(name)\n\n"
-            logger.debug("[remoteInput] → \(name)")
-            try await ri.send(text: message)
-            return
+            do {
+                let message = "type:button\nname:\(name)\nstate:click\n\n"
+                try await ri.send(text: message)
+                logger.debug("[remoteInput] → \(name) (state:click)")
+                return
+            } catch {
+                logger.warning("[remoteInput] send failed (\(name)): \(error.localizedDescription) — trying SSAP fallback")
+            }
+        } else {
+            logger.warning("[remoteInput] socket not connected — trying SSAP fallback")
         }
-        // Fallback: SSAP (may not work on all webOS versions)
-        logger.warning("[sendButton] Remote input socket not connected — falling back to SSAP")
+
+        // Strategy 2: SSAP sendButton — requires CONTROL_INPUT_JOYSTICK permission.
+        // If this fails, the user must re-pair so the TV issues a key with that permission.
         _ = try await sendRequest(
             uri: "ssap://com.webos.service.networkinput/sendButton",
             payload: ["name": .string(name)]
         )
+        logger.debug("[SSAP sendButton] → \(name)")
     }
 
     func launchApp(_ appId: String) async throws {
