@@ -237,7 +237,9 @@ final class LGWebOSClient: LGWebOSControlling {
                 logger.debug("[remoteInput] → \(name) (state:click)")
                 return
             } catch {
-                logger.warning("[remoteInput] send failed (\(name)): \(error.localizedDescription) — trying SSAP fallback")
+                logger.warning("[remoteInput] send failed (\(name)): \(error.localizedDescription) — disabling remote input socket, switching to SSAP")
+                remoteInputTransport?.disconnect()
+                remoteInputTransport = nil
             }
         } else {
             logger.warning("[remoteInput] socket not connected — trying SSAP fallback")
@@ -396,7 +398,7 @@ final class LGWebOSClient: LGWebOSControlling {
 
         logger.debug("[send] → type=\(type) uri=\(uri ?? "nil") id=\(requestID)")
 
-        return try await withCheckedThrowingContinuation { continuation in
+        let response = try await withCheckedThrowingContinuation { continuation in
             lock.lock()
             pending[requestID] = continuation
             lock.unlock()
@@ -410,6 +412,16 @@ final class LGWebOSClient: LGWebOSControlling {
                 }
             }
         }
+
+        if response.type == "error" {
+            let errorMsg = response.error
+                ?? response.payload?["errorText"]?.stringValue
+                ?? "Command rejected by TV"
+            logger.warning("[send] TV error for \(uri ?? "request"): \(errorMsg)")
+            throw LGWebOSError.unsupported(errorMsg)
+        }
+
+        return response
     }
 
     private func startReceiveLoop() {
