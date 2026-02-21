@@ -111,7 +111,39 @@ final class DiscoveryService: NSObject, DiscoveryServicing {
         }
     }
 
+    /// Returns the IPv4 address of the active Wi-Fi interface (en0), or nil if not on Wi-Fi.
+    private func wifiInterfaceAddress() -> in_addr? {
+        var ifap: UnsafeMutablePointer<ifaddrs>? = nil
+        guard getifaddrs(&ifap) == 0 else { return nil }
+        defer { freeifaddrs(ifap) }
+        var ifa = ifap
+        while let addr = ifa {
+            if String(cString: addr.pointee.ifa_name) == "en0",
+               let sa = addr.pointee.ifa_addr,
+               sa.pointee.sa_family == UInt8(AF_INET) {
+                return sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    $0.pointee.sin_addr
+                }
+            }
+            ifa = addr.pointee.ifa_next
+        }
+        return nil
+    }
+
     private func runSSDPSocket() async {
+        // iOS returns EHOSTUNREACH (errno 65) for multicast sendto when no interface
+        // is specified. We must bind to the Wi-Fi (en0) IP and set IP_MULTICAST_IF
+        // so the kernel routes the packet through Wi-Fi instead of cellular/loopback.
+        guard let wifiAddr = wifiInterfaceAddress() else {
+            logger.warning("[SSDP] en0 not found — device not on Wi-Fi, skipping SSDP")
+            onStatusChanged?("Connect iPhone to Wi-Fi and tap Discover again.")
+            return
+        }
+        var wifiAddrVar = wifiAddr
+        var ifBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        inet_ntop(AF_INET, &wifiAddrVar, &ifBuf, socklen_t(ifBuf.count))
+        logger.info("[SSDP] Outgoing interface: \(String(cString: ifBuf))")
+
         let sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard sock >= 0 else {
             logger.warning("[SSDP] socket() failed errno=\(errno)")
@@ -123,16 +155,21 @@ final class DiscoveryService: NSObject, DiscoveryServicing {
         setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &yes, socklen_t(MemoryLayout<Int32>.size))
 
-        // Bind to any address on an ephemeral port so the kernel assigns the source port.
+        // Bind to the Wi-Fi interface IP so traffic is routed through en0.
         var localAddr = sockaddr_in()
         localAddr.sin_family = sa_family_t(AF_INET)
         localAddr.sin_port = 0
-        localAddr.sin_addr.s_addr = INADDR_ANY
+        localAddr.sin_addr = wifiAddr
         withUnsafePointer(to: &localAddr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 _ = bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
+
+        // Explicitly set the outgoing multicast interface to en0.
+        // Without this, iOS has no multicast route and returns EHOSTUNREACH.
+        setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
+                   &wifiAddrVar, socklen_t(MemoryLayout<in_addr>.size))
 
         // Multicast TTL – 4 hops is more than enough for a local LAN.
         var ttl: UInt8 = 4
