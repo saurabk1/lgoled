@@ -151,15 +151,20 @@ final class DiscoveryService: NSObject, DiscoveryServicing {
         inet_aton("239.255.255.250", &dest.sin_addr)
 
         let queryBytes = Array(query.utf8)
+        var bytesSent: Int = 0
         queryBytes.withUnsafeBytes { ptr in
             withUnsafePointer(to: &dest) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    _ = sendto(sock, ptr.baseAddress, queryBytes.count, 0, $0,
-                               socklen_t(MemoryLayout<sockaddr_in>.size))
+                    bytesSent = sendto(sock, ptr.baseAddress, queryBytes.count, 0, $0,
+                                       socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
         }
-        logger.info("[SSDP] M-SEARCH sent to 239.255.255.250:1900")
+        if bytesSent > 0 {
+            logger.info("[SSDP] M-SEARCH sent (\(bytesSent) bytes) to 239.255.255.250:1900")
+        } else {
+            logger.error("[SSDP] M-SEARCH sendto failed — errno=\(errno). Local network permission may be denied.")
+        }
 
         // SO_RCVTIMEO: 1-second receive timeout so we can poll Task.isCancelled.
         var tv = timeval(tv_sec: 1, tv_usec: 0)
@@ -188,15 +193,30 @@ final class DiscoveryService: NSObject, DiscoveryServicing {
     private func handleSSDPResponse(_ data: Data) {
         guard let text = String(data: data, encoding: .utf8) else { return }
         let headers = parseHTTPHeaders(text)
-        guard let location = headers["location"], let locationURL = URL(string: location) else { return }
 
-        let fingerprint = (headers["server"] ?? "") + " " + (headers["st"] ?? "") + " " + (headers["usn"] ?? "")
+        // Log every SSDP response so we can diagnose what the TV is actually sending.
+        let server   = headers["server"] ?? "(no server)"
+        let st       = headers["st"]     ?? "(no st)"
+        let location = headers["location"] ?? "(no location)"
+        logger.debug("[SSDP] Response — server: \(server) | st: \(st) | location: \(location)")
+
+        guard let locationURL = URL(string: location) else { return }
+
+        let fingerprint = (headers["server"] ?? "") + " " + (headers["st"] ?? "") +
+                          " " + (headers["usn"] ?? "") + " " + (headers["location"] ?? "")
         let lowerFP   = fingerprint.lowercased()
         let lowerBody = text.lowercased()
 
-        // Filter to likely LG/webOS devices; avoids polluting the picker with routers etc.
-        guard lowerFP.contains("webos") || lowerFP.contains("lge")
-           || lowerBody.contains("webos") || lowerBody.contains("lge") else { return }
+        // Accept any response that looks LG/webOS-related.
+        // Some firmware versions use "LG" (not "LGE") in the server string.
+        let isLG = lowerFP.contains("webos") || lowerFP.contains("lge") ||
+                   lowerFP.contains(" lg")   || lowerFP.contains("lgsmarttv") ||
+                   lowerBody.contains("webos") || lowerBody.contains("lge") ||
+                   lowerBody.contains("lgsmarttv")
+        guard isLG else {
+            logger.debug("[SSDP] Filtered (not LG/webOS): server=\(server)")
+            return
+        }
 
         guard let host = locationURL.host, !host.isEmpty else { return }
         let port = locationURL.port ?? 3000

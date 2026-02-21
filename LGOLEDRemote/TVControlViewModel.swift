@@ -20,6 +20,25 @@ final class TVControlViewModel: ObservableObject {
 
     private var reconnectTask: Task<Void, Never>?
 
+    // Persist the last successfully-connected TV so the app auto-connects on relaunch
+    // without needing SSDP/Bonjour discovery to succeed.
+    private static let savedTVKey = "savedTV"
+
+    private func loadSavedTV() {
+        guard let data = UserDefaults.standard.data(forKey: Self.savedTVKey),
+              let tv = try? JSONDecoder().decode(LGTVDevice.self, from: data) else { return }
+        if !discoveredTVs.contains(where: { $0.id == tv.id }) {
+            discoveredTVs.append(tv)
+            discoveredTVs.sort { $0.name < $1.name }
+        }
+        if selectedTVID == nil { selectedTVID = tv.id }
+    }
+
+    private func saveTV(_ tv: LGTVDevice) {
+        guard let data = try? JSONEncoder().encode(tv) else { return }
+        UserDefaults.standard.set(data, forKey: Self.savedTVKey)
+    }
+
     init(
         discoveryService: DiscoveryServicing,
         client: LGWebOSControlling,
@@ -48,8 +67,10 @@ final class TVControlViewModel: ObservableObject {
             Task { @MainActor in
                 self?.connectionState = state
                 self?.diagnosticsSocketStatus = state.label
-                // Only auto-reconnect on clean disconnects, not on explicit errors
-                // (errors indicate a misconfiguration that retrying won't fix without user action).
+                if state == .paired, let tv = self?.selectedTV {
+                    self?.saveTV(tv)   // persist so next launch skips discovery
+                }
+                // Only auto-reconnect on clean disconnects, not on explicit errors.
                 if state == .disconnected {
                     self?.scheduleReconnect()
                 }
@@ -66,6 +87,13 @@ final class TVControlViewModel: ObservableObject {
     }
 
     func startDiscovery() {
+        // Restore the last-known TV immediately so the picker is populated
+        // and auto-connect fires before SSDP/Bonjour finishes (or fails).
+        loadSavedTV()
+        if let tv = selectedTV {
+            connectSelectedTV()
+            discoveryStatus = "Auto-connecting to \(tv.name)…"
+        }
         connectionState = .discovering
         discoveryService.startDiscovery()
     }
@@ -99,7 +127,7 @@ final class TVControlViewModel: ObservableObject {
 
         let manualDevice = LGTVDevice(
             id: "manual-\(host)",
-            name: "Manual \(host)",
+            name: "LG TV (\(host))",
             host: host,
             port: 3000,
             macAddress: nil
