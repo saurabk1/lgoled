@@ -1,24 +1,22 @@
-//
-//  ContentView.swift
-//  LGOLEDRemote
-//
-//  Created by SK on 2/7/26.
-//
-
 import SwiftUI
 
 struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
-    }
-}
+    @StateObject var viewModel: TVControlViewModel
 
-#Preview {
-    ContentView()
+    var body: some View {
+        TabView {
+            RemoteView(viewModel: viewModel)
+                .tabItem {
+                    Label("Remote", systemImage: "tv")
+                }
+
+            SettingsView(viewModel: viewModel)
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
+        }
+        .task {
+            viewModel.startDiscovery()
+        }
+    }
 }

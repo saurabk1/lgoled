@@ -29,9 +29,22 @@
 		535683E02F385971004B1F07 /* LGOLEDRemoteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LGOLEDRemoteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		538AC0AC2F396BE500B6EBE8 /* Exceptions for "LGOLEDRemote" folder in "LGOLEDRemote" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 535683C82F385970004B1F07 /* LGOLEDRemote */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		535683CB2F385970004B1F07 /* LGOLEDRemote */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				538AC0AC2F396BE500B6EBE8 /* Exceptions for "LGOLEDRemote" folder in "LGOLEDRemote" target */,
+			);
 			path = LGOLEDRemote;
 			sourceTree = "<group>";
 		};
@@ -400,6 +413,9 @@
 				DEVELOPMENT_TEAM = KGJ8S4CYQ9;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = LGOLEDRemote/Info.plist;
+				INFOPLIST_KEY_NSBonjourServices = "_lgsmarttv._tcp _lgtv2._tcp";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "This app discovers and controls your LG TV on your home network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +448,9 @@
 				DEVELOPMENT_TEAM = KGJ8S4CYQ9;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = LGOLEDRemote/Info.plist;
+				INFOPLIST_KEY_NSBonjourServices = "_lgsmarttv._tcp _lgtv2._tcp";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "This app discovers and controls your LG TV on your home network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
